@@ -3,15 +3,20 @@ from typing import Any, Dict, List
 
 import requests
 
+from .config import settings
+from .exceptions import SlackNotificationError
+from .logger import logger
+
 
 class SlackNotifier:
     """Sends notifications to Slack about pickleball court availability."""
 
     def __init__(self):
         """Initialize the Slack notifier with webhook URL from environment variables."""
-        self.webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+        self.webhook_url = settings.slack_webhook_url
         if not self.webhook_url:
-            raise ValueError("SLACK_WEBHOOK_URL environment variable is required")
+            raise SlackNotificationError("SLACK_WEBHOOK_URL environment variable is required")
+        logger.info("Initialized SlackNotifier")
 
     def send_notification(self, availabilities: List[Dict[str, Any]]) -> bool:
         """Send a notification to Slack with court availabilities.
@@ -25,12 +30,18 @@ class SlackNotifier:
         message = self.format_message(availabilities)
 
         try:
-            response = requests.post(self.webhook_url, json={"text": message})
+            logger.info("Sending notification to Slack")
+            response = requests.post(
+                self.webhook_url, 
+                json={"text": message},
+                timeout=30
+            )
             response.raise_for_status()
+            logger.info("Notification sent successfully")
             return True
         except requests.exceptions.RequestException as e:
-            print(f"Error sending message to Slack: {e}")
-            return False
+            logger.error(f"Error sending message to Slack: {e}")
+            raise SlackNotificationError(f"Failed to send Slack notification: {e}") from e
 
     def format_message(self, availabilities: List[Dict[str, Any]]) -> str:
         """Format court availabilities into a readable message.

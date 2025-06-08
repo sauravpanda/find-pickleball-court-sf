@@ -1,13 +1,16 @@
+import asyncio
 import datetime
 from typing import Any, Dict, List, Optional
 
 from browser_use import Agent
 from browser_use.browser import BrowserProfile
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from langchain_openai import ChatOpenAI
-
+from .config import settings
 from .court_factory import Court
+from .exceptions import BrowserError, CourtCheckError
+from .logger import logger
 
 
 class CourtAvailability(BaseModel):
@@ -28,7 +31,7 @@ class CourtAvailabilities(BaseModel):
 class CourtAvailabilityChecker:
     """Checks pickleball court availability using browser-use."""
 
-    def __init__(self, agent: Optional[Agent] = None):
+    def __init__(self, agent: Optional[Agent] = None, browser_headless: bool = False):
         """Initialize the court availability checker.
 
         Args:
@@ -36,15 +39,12 @@ class CourtAvailabilityChecker:
         """
         self.agent = agent
         self.browser_profile = BrowserProfile(
-            window_size={"width": 800, "height": 600},  # Small size for demonstration
-            # **playwright.devices['iPhone 13']         # or you can use a playwright device profile
-            # device_scale_factor=1.0,                  # change to 2~3 to emulate a high-DPI display for high-res screenshots
-            # viewport={'width': 800, 'height': 600},   # set the viewport (aka content size)
-            # screen={'width': 800, 'height': 600},     # hardware display size to report to websites via JS
-            headless=False,  # Use non-headless mode to see the window
+            window_size={"width": 1920, "height": 1080},
+            headless=browser_headless,
         )
         self.availabilities: List[CourtAvailability] = []
-        self.all_court_data: Dict[str, List[CourtAvailability]] = {}  # Store data by court name
+        self.all_court_data: Dict[str, List[CourtAvailability]] = {}
+        logger.info("Initialized CourtAvailabilityChecker")
 
     async def check_availability(
         self, court: Court, days: List[str], times: List[str]
@@ -55,7 +55,24 @@ class CourtAvailabilityChecker:
             court: The Court object to check
             days: List of days to check (e.g., ["Tuesday", "Thursday"])
             times: List of times to check (e.g., ["18:00", "19:00"])
+            
+        Raises:
+            CourtCheckError: If unable to check availability after retries
         """
+        for attempt in range(settings.max_retries):
+            try:
+                await self._check_availability_once(court, days, times)
+                return  # Success, exit retry loop
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1}/{settings.max_retries} failed for {court.name}: {e}")
+                if attempt == settings.max_retries - 1:
+                    raise CourtCheckError(f"Failed to check {court.name} after {settings.max_retries} attempts") from e
+                await asyncio.sleep(1)  # Wait before retry
+
+    async def _check_availability_once(
+        self, court: Court, days: List[str], times: List[str]
+    ) -> None:
+        """Single attempt to check availability for a court."""
         # Create a detailed task description for the agent
         task = (
             f"Check availability for {court.name} pickleball court on {', '.join(days)} "
@@ -107,21 +124,21 @@ class CourtAvailabilityChecker:
                         # Add the availabilities to our list
                         self.availabilities.extend(parsed.availabilities)
                         
-                        print(f"Found {len(parsed.availabilities)} available slots for {court.name}")
+                        logger.info(f"Found {len(parsed.availabilities)} available slots for {court.name}")
                     else:
                         # Handle text responses by creating an empty availabilities object
-                        print(f"No JSON data returned for {court.name}. Text response: {result[:100]}...")
-                        print(f"Found 0 available slots for {court.name}")
+                        logger.info(f"No JSON data returned for {court.name}. Text response: {result[:100]}...")
+                        logger.info(f"Found 0 available slots for {court.name}")
                 except Exception as e:
-                    print(f"Error parsing result for {court.name}: {e}")
-                    print(f"Raw result: {result}")
-                    print(f"Found 0 available slots for {court.name}")
+                    logger.error(f"Error parsing result for {court.name}: {e}")
+                    logger.debug(f"Raw result: {result}")
+                    logger.info(f"Found 0 available slots for {court.name}")
             else:
-                print(f"No availability data returned for {court.name}")
-                print(f"Found 0 available slots for {court.name}")
+                logger.info(f"No availability data returned for {court.name}")
+                logger.info(f"Found 0 available slots for {court.name}")
         except Exception as e:
-            print(f"Error checking availability for {court.name}: {e}")
-            print(f"Found 0 available slots for {court.name}")
+            logger.error(f"Error checking availability for {court.name}: {e}")
+            raise BrowserError(f"Browser error for {court.name}: {e}") from e
 
     async def get_available_courts(
         self, days: Optional[List[str]] = None, times: Optional[List[str]] = None
